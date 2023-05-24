@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-test = ["branthebuilder"]
+test = ["branthebuilder", "pandas"]
 doc = ["branthebuilder[doc]"]
 
 [project.urls]
