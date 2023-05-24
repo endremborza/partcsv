@@ -3,6 +3,7 @@ import gzip
 import multiprocessing as mp
 from functools import partial
 from hashlib import md5
+from itertools import islice
 from math import log10
 from pathlib import Path
 from typing import Callable, Iterable
@@ -16,90 +17,59 @@ def partition_dicts(
     num_partitions: int,
     parent_dir: str | Path = "",
     partition_type: type = str,
-    slot_per_partition: int = 100,
+    slot_per_partition: int = 1000,
     director_count=2,
+    batch_size=100,
     append: bool = False,
 ):
-    Runner(
-        iterable,
-        partition_key=partition_key,
-        num_partitions=num_partitions,
-        parent_dir=parent_dir,
-        partition_type=partition_type,
-        slot_per_partition=slot_per_partition,
-        director_count=director_count,
-        append=append,
-    ).run()
+    _it = iter(iterable)
+    _w = int(log10(num_partitions)) + 1
+    _namer = partial(_pstring, w=_w)
+    main_queue = mp.Queue(maxsize=int(num_partitions * slot_per_partition / batch_size))
 
+    q_dic = {_namer(i): mp.Queue() for i in range(num_partitions)}
 
-class Runner:
-    def __init__(
-        self,
-        iterable: Iterable[dict],
-        partition_key: str,
-        num_partitions: int,
-        parent_dir: str | Path = "",
-        partition_type: type = str,
-        slot_per_partition: int = 100,
-        director_count=2,
-        append: bool = False,
-    ) -> None:
-        self._it = iter(iterable)
-        _w = int(log10(num_partitions)) + 1
-        _namer = partial(_pstring, w=_w)
-        self.main_queue = mp.Queue(maxsize=int(num_partitions * slot_per_partition))
-        self.writers = [
-            PartitionWriter(_namer(i), parent_dir, append=append)
-            for i in range(num_partitions)
-        ]
-
-        q_dic = {w.name: w.q for w in self.writers}
-        part_getter = partial(
-            get_partition,
-            key=partition_key,
-            preproc=_PGET_DICT.get(partition_type, _pget_other),
-            n=num_partitions,
-            namer=_namer,
-        )
-
-        self.dir_proces = [
-            mp.Process(target=director, args=(q_dic, self.main_queue, part_getter))
-            for _ in range(director_count)
-        ]
-
-    def run(self):
-        try:
-            self._run()
-        except Exception as e:
-            print("killing everything after", e)
-            for p in self.dir_proces:
-                p.kill()
-            for w in self.writers:
-                w.proc.kill()
-
-    def _run(self):
-        for dproc in self.dir_proces:
-            dproc.start()
-        for elem in self._it:
-            self.main_queue.put(elem)
-        for _ in self.dir_proces:
-            self.main_queue.put(POISON_PILL)
-        for dp in self.dir_proces:
-            dp.join()
-        for w in self.writers:
-            w.proc.join()
-
-
-class PartitionWriter:
-    def __init__(self, partition_name, parent_dir, append: bool = False) -> None:
-        self.q = mp.Queue()
-        self.name = partition_name
-        self.proc = mp.Process(
+    writer_proces = [
+        mp.Process(
             target=partition_writer,
-            args=(partition_name, parent_dir, self.q, "at" if append else "wt"),
+            args=(name, parent_dir, q, "at" if append else "wt"),
         )
-        self.proc.start()
-        self.add = self.q.put
+        for name, q in q_dic.items()
+    ]
+
+    part_getter = partial(
+        get_partition,
+        key=partition_key,
+        preproc=_PGET_DICT.get(partition_type, _pget_other),
+        n=num_partitions,
+        namer=_namer,
+    )
+
+    dir_proces = [
+        mp.Process(target=director, args=(q_dic, main_queue, part_getter))
+        for _ in range(director_count)
+    ]
+    all_proces = writer_proces + dir_proces
+    try:
+        for proc in all_proces:
+            proc.start()
+        while True:
+            o = list(islice(_it, batch_size))
+            if not o:
+                break
+            main_queue.put(o)
+        for _ in range(director_count):
+            main_queue.put(POISON_PILL)
+        for dp in dir_proces:
+            dp.join()
+        for q in q_dic.values():
+            q.put(POISON_PILL)
+        for wp in writer_proces:
+            wp.join()
+    except Exception as e:
+        print("killing everything after", e)
+        for p in all_proces:
+            p.kill()
 
 
 def director(
@@ -110,11 +80,10 @@ def director(
     while True:
         elem = main_queue.get()
         if elem is POISON_PILL:
-            for q in q_dic.values():
-                q.put(POISON_PILL)
             return
-        partition = get_partition(elem)
-        q_dic[partition].put(elem)
+        for record in elem:
+            partition = get_partition(record)
+            q_dic[partition].put(record)
 
 
 def partition_writer(partition_name, parent_dir, queue: mp.Queue, mode: str = "wt"):
