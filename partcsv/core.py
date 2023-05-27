@@ -11,6 +11,37 @@ from typing import Callable, Iterable
 POISON_PILL = None
 
 
+def director(
+    q_dic: dict[str, mp.Queue],
+    main_queue: mp.Queue,
+    get_partition: Callable[[dict], str],
+):
+    while True:
+        elem = main_queue.get()
+        if elem is POISON_PILL:
+            return
+        for record in elem:
+            partition = get_partition(record)
+            q_dic[partition].put(record)
+
+
+def partition_writer(partition_name, parent_dir, queue: mp.Queue, mode: str = "wt"):
+    with gzip.open(
+        Path(parent_dir, f"{partition_name}.csv.gz"), mode, encoding="utf-8"
+    ) as gzp:
+        first_row = queue.get()
+        if first_row is POISON_PILL:
+            return
+        writer = csv.DictWriter(gzp, fieldnames=first_row.keys())
+        writer.writeheader()
+        writer.writerow(first_row)
+        while True:
+            row = queue.get()
+            if row is POISON_PILL:
+                return
+            writer.writerow(row)
+
+
 def partition_dicts(
     iterable: Iterable[dict],
     partition_key: str,
@@ -21,6 +52,7 @@ def partition_dicts(
     director_count=2,
     batch_size=100,
     append: bool = False,
+    writer_function: Callable[[str, str, mp.Queue, str], None] = partition_writer,
 ):
     _it = iter(iterable)
     _w = int(log10(num_partitions)) + 1
@@ -31,7 +63,7 @@ def partition_dicts(
 
     writer_proces = [
         mp.Process(
-            target=partition_writer,
+            target=writer_function,
             args=(name, parent_dir, q, "at" if append else "wt"),
         )
         for name, q in q_dic.items()
@@ -70,37 +102,6 @@ def partition_dicts(
         print("killing everything after", e)
         for p in all_proces:
             p.kill()
-
-
-def director(
-    q_dic: dict[str, mp.Queue],
-    main_queue: mp.Queue,
-    get_partition: Callable[[dict], str],
-):
-    while True:
-        elem = main_queue.get()
-        if elem is POISON_PILL:
-            return
-        for record in elem:
-            partition = get_partition(record)
-            q_dic[partition].put(record)
-
-
-def partition_writer(partition_name, parent_dir, queue: mp.Queue, mode: str = "wt"):
-    with gzip.open(
-        Path(parent_dir, f"{partition_name}.csv.gz"), mode, encoding="utf-8"
-    ) as gzp:
-        first_row = queue.get()
-        if first_row is POISON_PILL:
-            return
-        writer = csv.DictWriter(gzp, fieldnames=first_row.keys())
-        writer.writeheader()
-        writer.writerow(first_row)
-        while True:
-            row = queue.get()
-            if row is POISON_PILL:
-                return
-            writer.writerow(row)
 
 
 def get_partition(rec: dict, key: str, preproc: Callable, n: int, namer: Callable):
