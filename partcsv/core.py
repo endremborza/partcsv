@@ -42,6 +42,14 @@ def partition_writer(partition_name, parent_dir, queue: mp.Queue, mode: str = "w
             writer.writerow(row)
 
 
+def main_queue_filler(it: Iterable, main_queue: mp.Queue, batch_size: int):
+    while True:
+        o = list(islice(it, batch_size))
+        if not o:
+            return
+        main_queue.put(o)
+
+
 def partition_dicts(
     iterable: Iterable[dict],
     partition_key: str,
@@ -53,6 +61,7 @@ def partition_dicts(
     batch_size=100,
     append: bool = False,
     writer_function: Callable[[str, str, mp.Queue, str], None] = partition_writer,
+    main_queue_filler: Callable[[Iterable, mp.Queue, int], None] = main_queue_filler,
 ):
     _it = iter(iterable)
     _w = int(log10(num_partitions)) + 1
@@ -85,11 +94,7 @@ def partition_dicts(
     try:
         for proc in all_proces:
             proc.start()
-        while True:
-            o = list(islice(_it, batch_size))
-            if not o:
-                break
-            main_queue.put(o)
+        main_queue_filler(_it, main_queue, batch_size)
         for _ in range(director_count):
             main_queue.put(POISON_PILL)
         for dp in dir_proces:
