@@ -34,7 +34,11 @@ def test_main(tmp_path, parts, spp, dps, bs):
     assert df.shape[0] == n
 
 
-def xtest_errs(tmp_path):
-    partition_dicts(
-        [{"a": 10}, {"b": 10}], partition_key="a", num_partitions=2, parent_dir=tmp_path
-    )
+def test_errs(tmp_path):
+    with pytest.raises(ChildProcessError):
+        partition_dicts(
+            [{"a": 10}, {"b": 10}],
+            partition_key="a",
+            num_partitions=2,
+            parent_dir=tmp_path,
+        )

@@ -1,7 +1,9 @@
 import csv
 import gzip
+import io
 import multiprocessing as mp
-from functools import partial
+from dataclasses import dataclass, field
+from functools import partial, reduce
 from hashlib import md5
 from itertools import islice
 from math import log10
@@ -9,6 +11,74 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 POISON_PILL = None
+
+
+@dataclass
+class CsvRecordWriter:
+    rpath: Path
+    record_limit: int = 1_000_000
+    batch: list = field(default_factory=list)
+    record_count: int = field(default=0, init=False)
+    append: bool = False
+    headers_written: bool = field(default=False, init=False)
+    csv_writer: csv.DictWriter = field(init=False, default=None)
+    f: io.TextIOWrapper = field(init=False, default=None)
+    compression: bool = True
+
+    def __post_init__(self):
+        self.record_count = len(self.batch)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.close()
+
+    def add_to_batch(self, element):
+        self.batch.append(self._parse_elem(element))
+        self.record_count += self._rec_count_from_elem(element)
+        if self.record_count >= self.record_limit:
+            self._write()
+
+    def add_multiple(self, elements):
+        for e in elements:
+            self.add_to_batch(e)
+
+    def close(self):
+        if self.batch:
+            self._write()
+        if self.f is not None:
+            self.f.close()
+        self.record_count = 0
+        self.batch = []
+
+    @property
+    def csv_path(self):
+        suff = "" if not self.compression else ".gz"
+        return self.rpath.with_suffix(f".csv{suff}")
+
+    def _write(self):
+        if self.csv_writer is None:
+            keys = list(reduce(lambda keys, r: keys | r.keys(), self.batch, {}.keys()))
+            if self.compression:
+                self.f = gzip.open(
+                    self.csv_path,
+                    mode=("at" if self.append else "wt"),
+                    encoding="utf-8",
+                )
+            else:
+                self.f = self.csv_path.open("a" if self.append else "w")
+            self.csv_writer = csv.DictWriter(self.f, keys, extrasaction="ignore")
+            self.csv_writer.writeheader()
+        self.csv_writer.writerows(self.batch)
+        self.batch = []
+        self.record_count = 0
+
+    def _parse_elem(self, elem):
+        return elem
+
+    def _rec_count_from_elem(self, elem):
+        return 1
 
 
 def director(
@@ -25,21 +95,21 @@ def director(
             q_dic[partition].put(record)
 
 
-def partition_writer(partition_name, parent_dir, queue: mp.Queue, mode: str = "wt"):
-    with gzip.open(
-        Path(parent_dir, f"{partition_name}.csv.gz"), mode, encoding="utf-8"
-    ) as gzp:
-        first_row = queue.get()
-        if first_row is POISON_PILL:
-            return
-        writer = csv.DictWriter(gzp, fieldnames=first_row.keys())
-        writer.writeheader()
-        writer.writerow(first_row)
+def partition_writer(
+    partition_name,
+    parent_dir,
+    queue: mp.Queue,
+    append: bool = False,
+    batch_size: int = 10,
+):
+    with CsvRecordWriter(
+        Path(parent_dir, str(partition_name)), batch_size, append=append
+    ) as dwriter:
         while True:
             row = queue.get()
             if row is POISON_PILL:
                 return
-            writer.writerow(row)
+            dwriter.add_to_batch(row)
 
 
 def main_queue_filler(it: Iterable, main_queue: mp.Queue, batch_size: int):
@@ -60,7 +130,7 @@ def partition_dicts(
     director_count=2,
     batch_size=100,
     append: bool = False,
-    writer_function: Callable[[str, str, mp.Queue, str], None] = partition_writer,
+    writer_function: Callable[[str, str, mp.Queue, bool, int], None] = partition_writer,
     main_queue_filler: Callable[[Iterable, mp.Queue, int], None] = main_queue_filler,
 ):
     _it = iter(iterable)
@@ -73,7 +143,7 @@ def partition_dicts(
     writer_proces = [
         mp.Process(
             target=writer_function,
-            args=(name, parent_dir, q, "at" if append else "wt"),
+            args=(name, parent_dir, q, append, slot_per_partition),
         )
         for name, q in q_dic.items()
     ]
@@ -99,6 +169,8 @@ def partition_dicts(
             main_queue.put(POISON_PILL)
         for dp in dir_proces:
             dp.join()
+            if dp.exitcode != 0:
+                raise ChildProcessError("")
         for q in q_dic.values():
             q.put(POISON_PILL)
         for wp in writer_proces:
@@ -107,6 +179,7 @@ def partition_dicts(
         print("killing everything after", e)
         for p in all_proces:
             p.kill()
+        raise e
 
 
 def get_partition(rec: dict, key: str, preproc: Callable, n: int, namer: Callable):
