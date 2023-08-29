@@ -4,7 +4,7 @@ from itertools import product
 import pandas as pd
 import pytest
 
-from partcsv import partition_dicts
+from partcsv import CsvRecordWriter, partition_dicts
 
 
 def _gen(n, ks):
@@ -42,3 +42,21 @@ def test_errs(tmp_path):
             num_partitions=2,
             parent_dir=tmp_path,
         )
+
+
+@pytest.mark.parametrize(("comp",), [(True,), (False,)])
+def test_append(tmp_path, comp):
+    ks = list("abcdefghijklmnop")
+    p = tmp_path / "fing"
+    rw1 = CsvRecordWriter(p, record_limit=10, compression=comp)
+
+    rw1.add_multiple([dict(zip(ks, range(20))) for _ in range(20)])
+    rw1.close()
+
+    rw2 = CsvRecordWriter(p, record_limit=10, compression=comp, append=True)
+    rw2.add_multiple([dict(zip(["h", "k"], range(20))) for _ in range(10)])
+    rw2.close()
+
+    df = pd.read_csv(rw1.csv_path)
+    print(df)
+    assert df.shape[0] == 30

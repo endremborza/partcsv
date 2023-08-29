@@ -18,12 +18,14 @@ class CsvRecordWriter:
     rpath: Path
     record_limit: int = 1_000_000
     batch: list = field(default_factory=list)
-    record_count: int = field(default=0, init=False)
     append: bool = False
-    headers_written: bool = field(default=False, init=False)
+    compression: bool = True
+    extrasaction: str = "raise"  # or "ignore"
+    backup_queue: mp.Queue = None
+    force_keys: Iterable | None = None
+    record_count: int = field(init=False, default=0)
     csv_writer: csv.DictWriter = field(init=False, default=None)
     f: io.TextIOWrapper = field(init=False, default=None)
-    compression: bool = True
 
     def __post_init__(self):
         self.record_count = len(self.batch)
@@ -45,12 +47,10 @@ class CsvRecordWriter:
             self.add_to_batch(e)
 
     def close(self):
-        if self.batch:
+        while self.batch:
             self._write()
         if self.f is not None:
             self.f.close()
-        self.record_count = 0
-        self.batch = []
 
     @property
     def csv_path(self):
@@ -59,20 +59,35 @@ class CsvRecordWriter:
 
     def _write(self):
         if self.csv_writer is None:
-            keys = list(reduce(lambda keys, r: keys | r.keys(), self.batch, {}.keys()))
-            if self.compression:
-                self.f = gzip.open(
-                    self.csv_path,
-                    mode=("at" if self.append else "wt"),
-                    encoding="utf-8",
-                )
-            else:
-                self.f = self.csv_path.open("a" if self.append else "w")
-            self.csv_writer = csv.DictWriter(self.f, keys, extrasaction="ignore")
-            self.csv_writer.writeheader()
+            self._setup_writer()
         self.csv_writer.writerows(self.batch)
         self.batch = []
-        self.record_count = 0
+        self.record_count = len(self.batch)
+
+    def _setup_writer(self):
+        if self.compression:
+            self.f = gzip.open(
+                self.csv_path,
+                mode=("at" if self.append else "wt"),
+                encoding="utf-8",
+            )
+        else:
+            self.f = self.csv_path.open("a" if self.append else "w")
+        if self.append and self.csv_path.exists():
+            with (
+                gzip.open(self.csv_path, mode="rt", encoding="utf-8")
+                if self.compression
+                else open(self.csv_path, "r")
+            ) as _fp:
+                keys = csv.DictReader(_fp).fieldnames
+        elif self.force_keys:
+            keys = self.force_keys
+        else:
+            keys = list(reduce(lambda keys, r: keys | r.keys(), self.batch, {}.keys()))
+
+        self.csv_writer = csv.DictWriter(self.f, keys, extrasaction=self.extrasaction)
+        if not (self.csv_path.exists() and self.csv_path.stat().st_size):
+            self.csv_writer.writeheader()
 
     def _parse_elem(self, elem):
         return elem
@@ -101,9 +116,13 @@ def partition_writer(
     queue: mp.Queue,
     append: bool = False,
     batch_size: int = 10,
+    force_keys: list | None = None,
 ):
     with CsvRecordWriter(
-        Path(parent_dir, str(partition_name)), batch_size, append=append
+        Path(parent_dir, str(partition_name)),
+        record_limit=batch_size,
+        append=append,
+        force_keys=force_keys,
     ) as dwriter:
         while True:
             row = queue.get()
@@ -129,13 +148,17 @@ def partition_dicts(
     slot_per_partition: int = 1000,
     director_count=2,
     batch_size=100,
+    partition_buffer=500,
     append: bool = False,
+    force_keys: list | None = None,
     writer_function: Callable[[str, str, mp.Queue, bool, int], None] = partition_writer,
     main_queue_filler: Callable[[Iterable, mp.Queue, int], None] = main_queue_filler,
 ):
+    # column based partitioning / manual batch partitioning
     _it = iter(iterable)
     _w = int(log10(num_partitions)) + 1
     _namer = partial(_pstring, w=_w)
+    assert partition_buffer < slot_per_partition
     main_queue = mp.Queue(maxsize=int(num_partitions * slot_per_partition / batch_size))
 
     q_dic = {_namer(i): mp.Queue() for i in range(num_partitions)}
@@ -143,7 +166,14 @@ def partition_dicts(
     writer_proces = [
         mp.Process(
             target=writer_function,
-            args=(name, parent_dir, q, append, slot_per_partition),
+            args=(
+                name,
+                parent_dir,
+                q,
+                append,
+                partition_buffer,
+                force_keys,
+            ),
         )
         for name, q in q_dic.items()
     ]
