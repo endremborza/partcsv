@@ -70,9 +70,10 @@ class CsvRecordWriter:
                 self.csv_path,
                 mode=("at" if self.append else "wt"),
                 encoding="utf-8",
+                newline="",
             )
         else:
-            self.f = self.csv_path.open("a" if self.append else "w")
+            self.f = self.csv_path.open("a" if self.append else "w", newline="")
         if self.append and self.csv_path.exists():
             with (
                 gzip.open(self.csv_path, mode="rt", encoding="utf-8")
