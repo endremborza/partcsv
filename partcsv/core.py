@@ -74,7 +74,10 @@ class CsvRecordWriter:
             )
         else:
             self.f = self.csv_path.open("a" if self.append else "w", newline="")
-        if self.append and self.csv_path.exists():
+        written_something = self.csv_path.exists() and (
+            self.csv_path.stat().st_size > 0
+        )
+        if self.append and written_something:
             with (
                 gzip.open(self.csv_path, mode="rt", encoding="utf-8")
                 if self.compression
@@ -87,7 +90,7 @@ class CsvRecordWriter:
             keys = list(reduce(lambda keys, r: keys | r.keys(), self.batch, {}.keys()))
 
         self.csv_writer = csv.DictWriter(self.f, keys, extrasaction=self.extrasaction)
-        if not (self.csv_path.exists() and self.csv_path.stat().st_size):
+        if not written_something:
             self.csv_writer.writeheader()
 
     def _parse_elem(self, elem):
