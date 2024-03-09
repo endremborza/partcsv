@@ -157,16 +157,29 @@ def partition_dicts(
     force_keys: list | None = None,
     writer_function: Callable[[str, str, mp.Queue, bool, int], None] = partition_writer,
     main_queue_filler: Callable[[Iterable, mp.Queue, int], None] = main_queue_filler,
+    exact_partitions: None | set[str] = None,
 ):
     # column based partitioning / manual batch partitioning
-    _it = iter(iterable)
-    _w = int(log10(num_partitions)) + 1
-    _namer = partial(_pstring, w=_w)
     assert partition_buffer < slot_per_partition
+    if exact_partitions is not None:
+        num_partitions = len(exact_partitions)
+        part_getter = partial(get_key, key=partition_key)
+    else:
+        _w = int(log10(num_partitions)) + 1
+        _namer = partial(_pstring, w=_w)
+        part_getter = partial(
+            get_partition,
+            key=partition_key,
+            preproc=_PGET_DICT.get(partition_type, _pget_other),
+            n=num_partitions,
+            namer=_namer,
+        )
+        exact_partitions = set(map(_namer, range(num_partitions)))
     main_queue = mp.Queue(maxsize=int(num_partitions * slot_per_partition / batch_size))
 
-    q_dic = {_namer(i): mp.Queue() for i in range(num_partitions)}
+    q_dic = {p: mp.Queue() for p in exact_partitions}
 
+    _it = iter(iterable)
     writer_proces = [
         mp.Process(
             target=writer_function,
@@ -181,14 +194,6 @@ def partition_dicts(
         )
         for name, q in q_dic.items()
     ]
-
-    part_getter = partial(
-        get_partition,
-        key=partition_key,
-        preproc=_PGET_DICT.get(partition_type, _pget_other),
-        n=num_partitions,
-        namer=_namer,
-    )
 
     dir_proces = [
         mp.Process(target=director, args=(q_dic, main_queue, part_getter))
@@ -218,6 +223,10 @@ def partition_dicts(
 
 def get_partition(rec: dict, key: str, preproc: Callable, n: int, namer: Callable):
     return namer(_pget(preproc(rec[key]), n))
+
+
+def get_key(d, key):
+    return d[key]
 
 
 def _pget(elem: bytes, ngroups) -> int:
