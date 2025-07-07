@@ -146,7 +146,7 @@ def main_queue_filler(it: Iterable, main_queue: mp.Queue, batch_size: int):
 def partition_dicts(
     iterable: Iterable[dict],
     partition_key: str,
-    num_partitions: int,
+    num_partitions: int = 0,
     parent_dir: str | Path = "",
     partition_type: type = str,
     slot_per_partition: int = 1000,
